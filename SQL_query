@@ -57,6 +57,19 @@ SELECT TOP (1000) [row_key]
       ,[refetch_queue_position]
       ,[is_pending_refetch]
   FROM [ADSync].[dbo].[mms_connectorspace]
-  --where ma_id='D00AF070-4BE4-4CE1-A154-9A3A745E176E'
-  --object_id='A14AB4BA-CB47-F011-AA23-000C29499F30'
+  --where ma_id=''
+  --object_id=''
+
+
+SELECT TOP (1000) [row_key]
+      ,[step_history_id]
+      ,[statistics_type]
+      ,[ma_statistics_type]
+      ,[update_count]
+      ,[ma_id]
+      ,[cs_object_id]
+      ,[cs_dn]
+  FROM [ADSync].[dbo].[mms_step_object_details]
+where step_history_id = ''
+--cs_object_id='
 
