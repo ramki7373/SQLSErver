@@ -10,3 +10,8 @@ DELETE FROM Employees WHERE ID = 1;
 - CREATE TABLE – Defines a new table.
 CREATE TABLE Employees (ID INT PRIMARY KEY, Name VARCHAR(50), Age INT);
 - 
+
+
+SELECT DepartmentID, COUNT(*) AS EmployeeCount 
+FROM Employees 
+GROUP BY DepartmentID;
