@@ -1,0 +1,12 @@
+Here are 10 essential SQL Server commands that every developer should know:
+- SELECT – Retrieves data from a table.
+SELECT * FROM Employees;
+- INSERT – Adds new records to a table.
+INSERT INTO Employees (ID, Name, Age) VALUES (1, 'John Doe', 30);
+- UPDATE – Modifies existing records.
+UPDATE Employees SET Age = 31 WHERE ID = 1;
+- DELETE – Removes records from a table.
+DELETE FROM Employees WHERE ID = 1;
+- CREATE TABLE – Defines a new table.
+CREATE TABLE Employees (ID INT PRIMARY KEY, Name VARCHAR(50), Age INT);
+- 
