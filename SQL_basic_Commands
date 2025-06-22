@@ -1,0 +1,37 @@
+## Create Databse
+
+Use MASTER
+
+CREATE DATABASE Testdb01
+
+GO 
+USE Testdb01
+
+# Creating the databse and  if the database is use and dropped it.
+Use MASTER
+Drop Database if exists Testdb01
+CREATE DATABASE Testdb01
+GO 
+
+USE Testdb01
+# checking the databse session id 
+SELECT 
+    session_id, 
+    login_name, 
+    host_name, 
+    program_name
+FROM sys.dm_exec_sessions
+WHERE database_id = DB_ID('Testdb01');
+
+session_id loginid     host_name                     Program_name
+53	KO\user	Hostname	Microsoft SQL Server Management Studio - Query
+
+
+KILL 73;  # KILL Sessionid
+KILL  71;
+
+
+Commands completed successfully.
+Completion time: 2025-06-22T13:04:24.8394744-07:00
+
+
