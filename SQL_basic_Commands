@@ -35,3 +35,140 @@ Commands completed successfully.
 Completion time: 2025-06-22T13:04:24.8394744-07:00
 
 
+ SELECT
+Returns specific columns from a table.
+
+
+SELECT column_name
+FROM table_name;
+
+
+SELECT employee_name
+FROM employees;
+🔹 SELECT *
+Returns all columns from a table.
+
+
+SELECT *
+FROM table_name;
+
+
+SELECT *
+FROM employees;
+🔹 SELECT DISTINCT
+Returns only unique (non-duplicate) values.
+
+
+SELECT DISTINCT column_name
+FROM table_name;
+
+
+SELECT DISTINCT department
+FROM employees;
+🔹 SELECT INTO
+Copies data from one table to a new table.
+
+
+SELECT *
+INTO new_table
+FROM existing_table;
+
+
+SELECT *
+INTO employees_backup
+FROM employees;
+🔹 SELECT TOP
+Returns the first x rows or percentage of rows.
+
+
+-- Top N rows:
+SELECT TOP 5 *
+FROM table_name;
+
+-- Top N percent:
+SELECT TOP 10 PERCENT *
+FROM table_name;
+
+
+SELECT TOP 10 *
+FROM employees;
+🔹 AS (Alias)
+Gives a temporary name (alias) to a column or table.
+
+
+SELECT column_name AS alias_name
+FROM table_name;
+
+
+SELECT employee_name AS name
+FROM employees;
+🔹 FROM
+Specifies which table the data comes from.
+
+
+SELECT column_name
+FROM table_name;
+
+
+SELECT salary
+FROM employees;
+🔹 WHERE
+Filters data based on specific conditions.
+
+
+SELECT column_name
+FROM table_name
+WHERE condition;
+
+
+SELECT employee_name
+FROM employees
+WHERE department = 'HR';
+🔹 AND
+Returns rows only if all conditions are true.
+
+
+SELECT column_name
+FROM table_name
+WHERE condition1 AND condition2;
+
+
+SELECT employee_name
+FROM employees
+WHERE department = 'HR' AND salary > 50000;
+🔹 OR
+Returns rows if any condition is true.
+
+
+SELECT column_name
+FROM table_name
+WHERE condition1 OR condition2;
+
+
+SELECT employee_name
+FROM employees
+WHERE department = 'HR' OR department = 'Finance';
+🔹 BETWEEN
+Filters rows within a range (inclusive).
+
+
+SELECT column_name
+FROM table_name
+WHERE column_name BETWEEN value1 AND value2;
+
+
+SELECT employee_name
+FROM employees
+WHERE salary BETWEEN 40000 AND 60000;
+🔹 LIKE
+Searches for a pattern in a column.
+
+
+SELECT column_name
+FROM table_name
+WHERE column_name LIKE 'pattern';
+
+
+SELECT employee_name
+FROM employees
+WHERE employee_name LIKE '%son';
