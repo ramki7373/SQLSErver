@@ -8,3 +8,15 @@ WHERE object_type = 'person';
 SELECT object_id, object_type,accountName
 FROM [ADSync].[dbo].[mms_metaverse]
 WHERE object_type = 'group';
+
+
+SELECT DISTINCT object_type
+FROM [ADSync].[dbo].[mms_metaverse];
+
+
+SELECT * FROM [ADSync].[dbo].[mms_cs_link]
+
+
+To check how many connectors in the AAD connect server 
+
+SELECT * FROM [ADSync].[dbo].[mms_management_agent]
