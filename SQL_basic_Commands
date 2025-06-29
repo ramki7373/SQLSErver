@@ -1,7 +1,6 @@
 ## Create Databse
 
 Use MASTER
-
 CREATE DATABASE Testdb01
 
 GO 
