@@ -2,7 +2,6 @@
 
 Use MASTER
 CREATE DATABASE Testdb01
-
 GO 
 USE Testdb01
 
