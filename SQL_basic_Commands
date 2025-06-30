@@ -11,6 +11,8 @@ Drop Database if exists Testdb01
 CREATE DATABASE Testdb01
 GO 
 
+
+
 USE Testdb01
 # checking the databse session id 
 SELECT 
