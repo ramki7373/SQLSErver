@@ -5,6 +5,7 @@ CREATE DATABASE Testdb01
 GO 
 USE Testdb01
 
+
 # Creating the databse and  if the database is use and dropped it.
 Use MASTER
 Drop Database if exists Testdb01
