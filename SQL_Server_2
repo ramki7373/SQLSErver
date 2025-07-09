@@ -1,4 +1,4 @@
- Here are 10 essential SQL Server commands that every developer should know:
+  Here are 10 essential SQL Server commands that every developer should know:
 - SELECT – Retrieves data from a table.
 SELECT * FROM Employees;
 - INSERT – Adds new records to a table.
