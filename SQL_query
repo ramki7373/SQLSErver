@@ -1,4 +1,4 @@
-' SELECT TOP (1000) [row_key]
+ SELECT TOP (1000) [row_key]
       ,[object_id]
       ,[ma_id]
       ,[pobject_id]
