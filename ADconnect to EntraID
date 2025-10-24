@@ -1,4 +1,4 @@
-The SQL queries you’ve written will work only if accountName is a column in the mms_metaverse table. However, in the Azure AD Connect metaverse schema, attributes like accountName, mail, etc., are stored in a vertical table, not as flat columns in mms_metaverse.
+ The SQL queries you’ve written will work only if accountName is a column in the mms_metaverse table. However, in the Azure AD Connect metaverse schema, attributes like accountName, mail, etc., are stored in a vertical table, not as flat columns in mms_metaverse.
 
 SELECT object_id, object_type,accountName
 FROM [ADSync].[dbo].[mms_metaverse]
