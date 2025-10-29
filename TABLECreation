@@ -1,66 +1,79 @@
-CREATE TABLE Users (
+-- =============================================
+-- 1. Drop table if it already exists (optional)
+-- =============================================
+IF OBJECT_ID('dbo.Users', 'U') IS NOT NULL
+    DROP TABLE dbo.Users;
+GO
+
+-- =============================================
+-- 2. Create Users table
+-- =============================================
+CREATE TABLE dbo.Users (
     UserID INT IDENTITY(1,1) PRIMARY KEY,
-    UserName NVARCHAR(100),
-    Email NVARCHAR(150),
+    UserName NVARCHAR(100) NOT NULL,
+    Email NVARCHAR(150) NOT NULL,
     CreatedDate DATETIME DEFAULT GETDATE(),
-    IsActive BIT DEFAULT 1
+    IsActive BIT DEFAULT 1,
+    Department NVARCHAR(50) NULL
 );
-✅ This creates a Users table with:
+GO
 
-UserID: Auto-incremented primary key
+-- =============================================
+-- 3. Insert sample data
+-- =============================================
+INSERT INTO dbo.Users (UserName, Email, Department)
+VALUES
+('John Doe', 'john.doe@example.com', 'IT'),
+('Jane Smith', 'jane.smith@example.com', 'HR'),
+('Alice Brown', 'alice.brown@example.com', 'Finance'),
+('Bob Johnson', 'bob.johnson@example.com', 'IT'),
+('Clara White', 'clara.white@example.com', 'Marketing');
+GO
 
-UserName, Email: Text fields
-
-CreatedDate: Defaults to current date
-
-IsActive: Boolean (1 = active, 0 = inactive)
-
-➕ 2. Insert Data
-sql
-Copy code
-INSERT INTO Users (UserName, Email)
-VALUES 
-('John Doe', 'john.doe@example.com'),
-('Jane Smith', 'jane.smith@example.com'),
-('Alice Brown', 'alice.brown@example.com');
-Adds three users to the Users table.
-
-🔍 3. Select Data (Top 100 rows)
-sql
-Copy code
+-- =============================================
+-- 4. Select top 100 users (test query)
+-- =============================================
 SELECT TOP 100 *
-FROM Users
+FROM dbo.Users
 ORDER BY CreatedDate DESC;
-Retrieves the latest 100 users from the table.
+GO
 
-✏️ 4. Update Data
-sql
-Copy code
-UPDATE Users
+-- =============================================
+-- 5. Update a user (e.g., deactivate John Doe)
+-- =============================================
+UPDATE dbo.Users
 SET IsActive = 0
 WHERE UserName = 'John Doe';
-Marks John Doe as inactive.
+GO
 
-➕ 5. Add a New Column (Optional)
-sql
-Copy code
-ALTER TABLE Users
-ADD Department NVARCHAR(50);
-Adds a new column to store the user’s department.
-
-🔎 6. Filter / Search
-sql
-Copy code
+-- =============================================
+-- 6. Verify update
+-- =============================================
 SELECT *
-FROM Users
-WHERE IsActive = 1
-AND Email LIKE '%@example.com';
-Shows active users whose email ends with @example.com.
+FROM dbo.Users
+WHERE UserName = 'John Doe';
+GO
 
-🧮 7. Count Users
-sql
-Copy code
-SELECT COUNT(*) AS TotalUsers
-FROM Users
+-- =============================================
+-- 7. Insert another user
+-- =============================================
+INSERT INTO dbo.Users (UserName, Email, Department)
+VALUES ('Emily Davis', 'emily.davis@example.com', 'HR');
+GO
+
+-- =============================================
+-- 8. Select active users in IT department
+-- =============================================
+SELECT *
+FROM dbo.Users
+WHERE IsActive = 1
+AND Department = 'IT';
+GO
+
+-- =============================================
+-- 9. Count active users
+-- =============================================
+SELECT COUNT(*) AS TotalActiveUsers
+FROM dbo.Users
 WHERE IsActive = 1;
-Returns the number of active users.
+GO
