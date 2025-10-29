@@ -1,0 +1,66 @@
+CREATE TABLE Users (
+    UserID INT IDENTITY(1,1) PRIMARY KEY,
+    UserName NVARCHAR(100),
+    Email NVARCHAR(150),
+    CreatedDate DATETIME DEFAULT GETDATE(),
+    IsActive BIT DEFAULT 1
+);
+✅ This creates a Users table with:
+
+UserID: Auto-incremented primary key
+
+UserName, Email: Text fields
+
+CreatedDate: Defaults to current date
+
+IsActive: Boolean (1 = active, 0 = inactive)
+
+➕ 2. Insert Data
+sql
+Copy code
+INSERT INTO Users (UserName, Email)
+VALUES 
+('John Doe', 'john.doe@example.com'),
+('Jane Smith', 'jane.smith@example.com'),
+('Alice Brown', 'alice.brown@example.com');
+Adds three users to the Users table.
+
+🔍 3. Select Data (Top 100 rows)
+sql
+Copy code
+SELECT TOP 100 *
+FROM Users
+ORDER BY CreatedDate DESC;
+Retrieves the latest 100 users from the table.
+
+✏️ 4. Update Data
+sql
+Copy code
+UPDATE Users
+SET IsActive = 0
+WHERE UserName = 'John Doe';
+Marks John Doe as inactive.
+
+➕ 5. Add a New Column (Optional)
+sql
+Copy code
+ALTER TABLE Users
+ADD Department NVARCHAR(50);
+Adds a new column to store the user’s department.
+
+🔎 6. Filter / Search
+sql
+Copy code
+SELECT *
+FROM Users
+WHERE IsActive = 1
+AND Email LIKE '%@example.com';
+Shows active users whose email ends with @example.com.
+
+🧮 7. Count Users
+sql
+Copy code
+SELECT COUNT(*) AS TotalUsers
+FROM Users
+WHERE IsActive = 1;
+Returns the number of active users.
