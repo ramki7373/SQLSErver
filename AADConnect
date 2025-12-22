@@ -1,0 +1,36 @@
+# Azure AD Connect (ADSync) SQL Queries
+
+This repository contains useful SQL queries for the **Azure AD Connect (ADSync) database**.
+These queries help administrators inspect:
+
+- Metaverse objects
+- Attribute values (vertical schema)
+- Connector space links
+- Management agents (connectors)
+
+⚠️ **Important**
+- These queries are **READ-ONLY**
+- Run them on the **ADSync database**
+- Microsoft does **not support database modifications**
+
+---
+
+## Database Overview
+
+| Table | Purpose |
+|------|--------|
+| mms_metaverse | Stores metaverse objects |
+| mms_mv_attribute | Stores attribute values |
+| mms_attribute | Stores attribute names |
+| mms_cs_link | Links CS objects to MV |
+| mms_management_agent | Lists configured connectors |
+
+---
+
+## Usage
+
+Connect to the ADSync database:
+
+```sql
+USE ADSync;
+GO
