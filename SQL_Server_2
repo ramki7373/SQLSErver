@@ -1,17 +1,110 @@
-  Here are 10 essential SQL Server commands that every developer should know:
-- SELECT – Retrieves data from a table.
-SELECT * FROM Employees;
-- INSERT – Adds new records to a table.
-INSERT INTO Employees (ID, Name, Age) VALUES (1, 'John Doe', 30);
-- UPDATE – Modifies existing records.
-UPDATE Employees SET Age = 31 WHERE ID = 1;
-- DELETE – Removes records from a table.
-DELETE FROM Employees WHERE ID = 1;
-- CREATE TABLE – Defines a new table.
-CREATE TABLE Employees (ID INT PRIMARY KEY, Name VARCHAR(50), Age INT);
-- 
+/* =========================================================
+   SQL SERVER ESSENTIAL COMMANDS – SINGLE SCRIPT WITH COMMENTS
+   ========================================================= */
+
+/* 1️⃣ CREATE TABLE
+   Creates an Employees table with basic columns */
+CREATE TABLE Employees (
+    ID INT PRIMARY KEY,              -- Unique employee ID
+    Name VARCHAR(50),                 -- Employee name
+    Age INT,                          -- Employee age
+    DepartmentID INT                 -- Department reference
+);
+GO
 
 
-SELECT DepartmentID, COUNT(*) AS EmployeeCount 
-FROM Employees 
+/* 2️⃣ INSERT
+   Adds sample records into the Employees table */
+INSERT INTO Employees (ID, Name, Age, DepartmentID)
+VALUES 
+(1, 'John Doe', 30, 101),
+(2, 'Jane Smith', 28, 102),
+(3, 'Mike Brown', 35, 101);
+GO
+
+
+/* 3️⃣ SELECT
+   Retrieves all records from the Employees table */
+SELECT * 
+FROM Employees;
+GO
+
+
+/* 4️⃣ WHERE
+   Filters employees older than 30 */
+SELECT *
+FROM Employees
+WHERE Age > 30;
+GO
+
+
+/* 5️⃣ UPDATE
+   Updates the age of a specific employee */
+UPDATE Employees
+SET Age = 31
+WHERE ID = 1;
+GO
+
+
+/* 6️⃣ ORDER BY
+   Sorts employees by age in descending order */
+SELECT *
+FROM Employees
+ORDER BY Age DESC;
+GO
+
+
+/***** 7️⃣ GROUP BY with COUNT
+   Groups employees by department and counts them */
+SELECT DepartmentID, COUNT(*) AS EmployeeCount
+FROM Employees
 GROUP BY DepartmentID;
+GO
+
+
+/* 8️⃣ CREATE TABLE (Departments)
+   Creates a second table to demonstrate JOIN */
+CREATE TABLE Departments (
+    DepartmentID INT PRIMARY KEY,
+    DepartmentName VARCHAR(50)
+);
+GO
+
+
+/* 9️⃣ INSERT INTO Departments */
+INSERT INTO Departments (DepartmentID, DepartmentName)
+VALUES
+(101, 'IT'),
+(102, 'HR');
+GO
+
+
+/* 🔟 JOIN
+   Combines Employees and Departments tables */
+SELECT e.Name, e.Age, d.DepartmentName
+FROM Employees e
+INNER JOIN Departments d
+ON e.DepartmentID = d.DepartmentID;
+GO
+
+
+/* BONUS: DELETE
+   Removes a specific employee record */
+DELETE FROM Employees
+WHERE ID = 3;
+GO
+
+
+/* BONUS: ALTER TABLE
+   Adds a new column to the Employees table */
+ALTER TABLE Employees
+ADD Salary INT;
+GO
+
+
+/* BONUS: DROP TABLE
+   Permanently deletes tables (use with caution) */
+/*
+DROP TABLE Employees;
+DROP TABLE Departments;
+*/
