@@ -1,0 +1,493 @@
+<#
+.SYNOPSIS
+    Entra ID - Full App Registration & Enterprise App Classification - Single Output File
+
+.DESCRIPTION
+    LOGIC FLOW:
+    ============
+    STEP 1 - BACKUP (raw data collected in memory)
+    STEP 2 - APP REGISTRATIONS
+        - Check openid scope → OIDC or OAuth 2.0
+    STEP 3 - ENTERPRISE APPS
+        - Match AppId to App Registration → Linked App
+        - No match → Gallery / Managed Identity / First-Party / External
+    STEP 4 - SSO CHECK
+        - SAML mode + signals → SSO Enabled + EntityId
+    STEP 5 - MERGE everything into ONE CSV
+        C:\Temp\Entra_<datetime>.csv
+
+.REQUIREMENTS
+    Install-Module Microsoft.Graph -Scope CurrentUser
+    PowerShell 5.1+
+#>
+
+#region ── CONSTANTS ───────────────────────────────────────────────────────────
+
+$MicrosoftTenantIds = @(
+    "f8cdef31-a31e-4b4a-93e4-5f571e91255a",
+    "72f988bf-86f1-41af-91ab-2d7cd011db47"
+)
+
+$MsGraphAppId  = "00000003-0000-0000-c000-000000000000"
+$AadGraphAppId = "00000002-0000-0000-c000-000000000000"
+
+$OidcScopeGuids = @(
+    "37f7f235-527c-4136-accd-4a02d197296e",   # openid
+    "14dad69e-099b-42c9-810b-d002981feec1",   # profile
+    "64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0",   # email
+    "7427e0e9-2fba-42fe-b0c0-848c9e6a8182"    # offline_access
+)
+
+$OidcScopeNames = @("openid", "profile", "email", "offline_access")
+
+#endregion
+
+#region ── CONNECT ─────────────────────────────────────────────────────────────
+
+Write-Host "`n[*] Connecting to Microsoft Graph..." -ForegroundColor Cyan
+Connect-MgGraph -Scopes "Application.Read.All", "Directory.Read.All" -NoWelcome
+Write-Host "[OK] Connected.`n" -ForegroundColor Green
+
+#endregion
+
+#region ── OUTPUT FOLDER ───────────────────────────────────────────────────────
+
+if (-not (Test-Path -Path "C:\Temp")) {
+    New-Item -ItemType Directory -Path "C:\Temp" | Out-Null
+    Write-Host "[*] Created folder: C:\Temp" -ForegroundColor Yellow
+}
+
+$dateStamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputPath = "C:\Temp\Entra_$dateStamp.csv"
+
+#endregion
+
+#region ── STEP 1: FETCH ALL DATA ──────────────────────────────────────────────
+
+Write-Host "============================================================" -ForegroundColor DarkCyan
+Write-Host " STEP 1: Fetching Data from Microsoft Graph" -ForegroundColor Cyan
+Write-Host "============================================================`n" -ForegroundColor DarkCyan
+
+# ── App Registrations ────────────────────────────────────────────────────────
+Write-Host "[*] Fetching App Registrations..." -ForegroundColor Cyan
+
+$allAppRegs = Get-MgApplication -All -Property `
+    "Id,AppId,DisplayName,SignInAudience,IdentifierUris,
+     RequiredResourceAccess,Oauth2PermissionScopes,
+     ImplicitGrantSettings,PasswordCredentials,KeyCredentials,
+     Web,Spa,PublicClient,CreatedDateTime"
+
+Write-Host "[OK] Found $($allAppRegs.Count) App Registrations." -ForegroundColor Green
+
+# ── Enterprise Apps ──────────────────────────────────────────────────────────
+Write-Host "[*] Fetching Enterprise Apps (Service Principals)..." -ForegroundColor Cyan
+
+$allSPs = Get-MgServicePrincipal -All -Property `
+    "Id,AppId,DisplayName,AppOwnerOrganizationId,ServicePrincipalType,
+     Tags,MicrosoftFirstParty,AccountEnabled,
+     PreferredSingleSignOnMode,SamlMetadataUrl,
+     LoginUrl,ReplyUrls,Oauth2PermissionScopes,AppRoles"
+
+Write-Host "[OK] Found $($allSPs.Count) Enterprise Apps.`n" -ForegroundColor Green
+
+# ── Build lookup: AppId → App Registration ───────────────────────────────────
+$appRegLookup = @{}
+foreach ($reg in $allAppRegs) {
+    $appRegLookup[$reg.AppId] = $reg
+}
+
+# ── Build lookup: AppId → Service Principal ───────────────────────────────────
+$spLookup = @{}
+foreach ($sp in $allSPs) {
+    $spLookup[$sp.AppId] = $sp
+}
+
+#endregion
+
+#region ── HELPER FUNCTIONS ────────────────────────────────────────────────────
+
+function Test-HasOpenIdScope {
+    param ([object]$AppReg)
+
+    if ($null -eq $AppReg) { return $false }
+
+    # Check 1: requiredResourceAccess contains openid scope GUIDs
+    if ($null -ne $AppReg.RequiredResourceAccess) {
+        foreach ($resource in $AppReg.RequiredResourceAccess) {
+            if ($null -ne $resource.ResourceAccess) {
+                foreach ($scope in $resource.ResourceAccess) {
+                    if ($scope.Type -eq "Scope" -and ($OidcScopeGuids -contains $scope.Id)) {
+                        return $true
+                    }
+                }
+            }
+        }
+    }
+
+    # Check 2: Exposes oauth2PermissionScopes with openid names
+    if ($null -ne $AppReg.Oauth2PermissionScopes) {
+        foreach ($scope in $AppReg.Oauth2PermissionScopes) {
+            if ($null -ne $scope.Value -and ($OidcScopeNames -contains $scope.Value.ToLower())) {
+                return $true
+            }
+        }
+    }
+
+    # Check 3: Implicit grant id_token enabled
+    if ($null -ne $AppReg.ImplicitGrantSettings) {
+        if ($AppReg.ImplicitGrantSettings.EnableIdTokenIssuance -eq $true) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-RedirectUris {
+    param ([object]$AppReg)
+    $uris = @()
+    if ($null -ne $AppReg.Web          -and $null -ne $AppReg.Web.RedirectUris)          { $uris += $AppReg.Web.RedirectUris }
+    if ($null -ne $AppReg.Spa          -and $null -ne $AppReg.Spa.RedirectUris)          { $uris += $AppReg.Spa.RedirectUris }
+    if ($null -ne $AppReg.PublicClient -and $null -ne $AppReg.PublicClient.RedirectUris) { $uris += $AppReg.PublicClient.RedirectUris }
+    return ($uris -join "; ")
+}
+
+function Get-RequiredResources {
+    param ([object]$AppReg)
+    if ($null -eq $AppReg -or $null -eq $AppReg.RequiredResourceAccess) { return "" }
+    $resources = foreach ($r in $AppReg.RequiredResourceAccess) {
+        $scopeNames = foreach ($s in $r.ResourceAccess) {
+            if ($s.Type -eq "Scope") { "Delegated:$($s.Id)" }
+            else                     { "AppRole:$($s.Id)"   }
+        }
+        "$($r.ResourceAppId) [$($scopeNames -join ', ')]"
+    }
+    return ($resources -join " | ")
+}
+
+#endregion
+
+#region ── STEP 2 + 3 + 4: CLASSIFY AND MERGE ─────────────────────────────────
+
+Write-Host "============================================================" -ForegroundColor DarkCyan
+Write-Host " STEP 2-4: Classifying & Merging All Apps" -ForegroundColor Cyan
+Write-Host "============================================================`n" -ForegroundColor DarkCyan
+
+$allResults  = @()
+$processedAppIds = @{}
+
+# ════════════════════════════════════════════════════════════════
+# PASS 1 — Process App Registrations first (source of truth)
+# ════════════════════════════════════════════════════════════════
+$counter = 0
+foreach ($app in $allAppRegs) {
+    $counter++
+    Write-Progress -Activity "Processing App Registrations" `
+                   -Status "$counter of $($allAppRegs.Count): $($app.DisplayName)" `
+                   -PercentComplete (($counter / $allAppRegs.Count) * 100)
+
+    $processedAppIds[$app.AppId] = $true
+
+    # ── App Reg classification ───────────────────────────────────────────────
+    $hasOpenId         = Test-HasOpenIdScope -AppReg $app
+    $appRegProtocol    = if ($hasOpenId) { "OIDC" } else { "OAuth 2.0" }
+
+    $hasClientSecret   = ($null -ne $app.PasswordCredentials -and $app.PasswordCredentials.Count -gt 0)
+    $hasCertificate    = ($null -ne $app.KeyCredentials      -and $app.KeyCredentials.Count -gt 0)
+    $redirectUris      = Get-RedirectUris      -AppReg $app
+    $requiredResources = Get-RequiredResources -AppReg $app
+
+    # ── Find linked Enterprise App (Service Principal) ───────────────────────
+    $linkedSP          = $null
+    $spObjectId        = ""
+    $spAccountEnabled  = ""
+    $spSPType          = ""
+    $spOwnerOrgId      = ""
+    $spTags            = ""
+    $ssoEnabled        = "No"
+    $entityId          = ""
+    $preferredSSOMode  = ""
+    $samlMetadataUrl   = ""
+    $loginUrl          = ""
+    $appType           = ""
+    $isGallery         = "No"
+    $isMsft            = "No"
+    $isManagedIdentity = "No"
+    $notes             = @()
+
+    if ($spLookup.ContainsKey($app.AppId)) {
+        $linkedSP         = $spLookup[$app.AppId]
+        $spObjectId       = $linkedSP.Id
+        $spAccountEnabled = $linkedSP.AccountEnabled
+        $spSPType         = $linkedSP.ServicePrincipalType
+        $spOwnerOrgId     = $linkedSP.AppOwnerOrganizationId
+        $spTags           = ($linkedSP.Tags -join "; ")
+        $preferredSSOMode = $linkedSP.PreferredSingleSignOnMode
+        $samlMetadataUrl  = $linkedSP.SamlMetadataUrl
+        $loginUrl         = $linkedSP.LoginUrl
+
+        # Managed Identity
+        if ($linkedSP.ServicePrincipalType -eq "ManagedIdentity") {
+            $isManagedIdentity = "Yes"
+            $appType           = "Managed Identity"
+            $notes            += "ServicePrincipalType = ManagedIdentity"
+        }
+        # Microsoft First-Party
+        elseif (
+            ($MicrosoftTenantIds -contains $linkedSP.AppOwnerOrganizationId) -or
+            ($linkedSP.ServicePrincipalType -eq "MicrosoftFirst") -or
+            ($linkedSP.Tags -contains "WindowsAzureActiveDirectoryIntegratedApp") -or
+            ($linkedSP.MicrosoftFirstParty -eq $true)
+        ) {
+            $isMsft  = "Yes"
+            $appType = "Microsoft First-Party"
+            $notes  += "Owned by Microsoft"
+        }
+        # Gallery App
+        elseif (
+            ($linkedSP.Tags -contains "WindowsAzureActiveDirectoryGalleryApplicationPrimary") -or
+            ($linkedSP.Tags -contains "WindowsAzureActiveDirectoryCustomSingleSignOnApplication")
+        ) {
+            $isGallery = "Yes"
+            $appType   = "Gallery App (Linked)"
+            $notes    += "Gallery App matched to App Registration"
+        }
+        else {
+            $appType = "Linked App ($appRegProtocol)"
+            $notes  += "Enterprise App matched to App Registration; Protocol: $appRegProtocol"
+        }
+
+        # SSO Check
+        if ($linkedSP.PreferredSingleSignOnMode -eq "saml") {
+            $hasSamlSignals = (
+                ($null -ne $linkedSP.SamlMetadataUrl -and $linkedSP.SamlMetadataUrl -ne "") -or
+                ($null -ne $linkedSP.LoginUrl        -and $linkedSP.LoginUrl        -ne "") -or
+                ($null -ne $linkedSP.ReplyUrls       -and $linkedSP.ReplyUrls.Count  -gt 0)
+            )
+            if ($hasSamlSignals) {
+                $ssoEnabled = "Yes"
+                $appType    = $appType + " + SAML-SSO"
+                $notes     += "SAML SSO Enabled"
+                if ($null -ne $app.IdentifierUris -and $app.IdentifierUris.Count -gt 0) {
+                    $entityId = $app.IdentifierUris[0]
+                    $notes   += "EntityId: $entityId"
+                }
+                else {
+                    $notes += "SSO enabled but EntityId not set in IdentifierUris"
+                }
+            }
+        }
+    }
+    else {
+        # No Enterprise App linked
+        $appType = "App Registration Only ($appRegProtocol)"
+        $notes  += "No linked Enterprise App (Service Principal) found"
+    }
+
+    $allResults += New-Object PSObject -Property ([ordered]@{
+
+        # ── Identity ─────────────────────────────────────────────────────────
+        RecordType             = "App Registration"
+        DisplayName            = $app.DisplayName
+        AppId                  = $app.AppId
+        AppRegObjectId         = $app.Id
+        EntAppObjectId         = $spObjectId
+        AppOwnerOrganizationId = $spOwnerOrgId
+
+        # ── Classification ───────────────────────────────────────────────────
+        AppType                = $appType
+        Protocol               = $appRegProtocol
+        HasOpenIdScope         = $hasOpenId
+        IsMicrosoftFirstParty  = $isMsft
+        IsManagedIdentity      = $isManagedIdentity
+        IsGalleryApp           = $isGallery
+        LinkedToEnterpriseApp  = if ($null -ne $linkedSP) { "Yes" } else { "No" }
+
+        # ── SSO ──────────────────────────────────────────────────────────────
+        SSOEnabled             = $ssoEnabled
+        EntityId               = $entityId
+        PreferredSSOMode       = $preferredSSOMode
+        SamlMetadataUrl        = $samlMetadataUrl
+        LoginUrl               = $loginUrl
+
+        # ── App Registration Details ─────────────────────────────────────────
+        SignInAudience         = $app.SignInAudience
+        IdentifierUris         = ($app.IdentifierUris -join "; ")
+        RedirectUris           = $redirectUris
+        HasClientSecret        = if ($hasClientSecret) { "Yes" } else { "No" }
+        HasCertificate         = if ($hasCertificate)  { "Yes" } else { "No" }
+        RequiredResources      = $requiredResources
+        CreatedDateTime        = $app.CreatedDateTime
+
+        # ── Enterprise App Details ───────────────────────────────────────────
+        AccountEnabled         = $spAccountEnabled
+        ServicePrincipalType   = $spSPType
+        Tags                   = $spTags
+
+        # ── Notes ────────────────────────────────────────────────────────────
+        Notes                  = ($notes -join " | ")
+    })
+}
+
+Write-Progress -Activity "Processing App Registrations" -Completed
+
+# ════════════════════════════════════════════════════════════════
+# PASS 2 — Process Enterprise Apps NOT linked to any App Reg
+# ════════════════════════════════════════════════════════════════
+$counter = 0
+$standaloneEntApps = $allSPs | Where-Object { -not $processedAppIds.ContainsKey($_.AppId) }
+
+foreach ($sp in $standaloneEntApps) {
+    $counter++
+    Write-Progress -Activity "Processing Standalone Enterprise Apps" `
+                   -Status "$counter of $($standaloneEntApps.Count): $($sp.DisplayName)" `
+                   -PercentComplete (($counter / [Math]::Max($standaloneEntApps.Count,1)) * 100)
+
+    $appType           = ""
+    $isGallery         = "No"
+    $isMsft            = "No"
+    $isManagedIdentity = "No"
+    $ssoEnabled        = "No"
+    $entityId          = ""
+    $notes             = @()
+
+    # Managed Identity
+    if ($sp.ServicePrincipalType -eq "ManagedIdentity") {
+        $isManagedIdentity = "Yes"
+        $appType           = "Managed Identity"
+        $notes            += "ServicePrincipalType = ManagedIdentity"
+    }
+    # Microsoft First-Party
+    elseif (
+        ($MicrosoftTenantIds -contains $sp.AppOwnerOrganizationId) -or
+        ($sp.ServicePrincipalType -eq "MicrosoftFirst") -or
+        ($sp.Tags -contains "WindowsAzureActiveDirectoryIntegratedApp") -or
+        ($sp.MicrosoftFirstParty -eq $true)
+    ) {
+        $isMsft  = "Yes"
+        $appType = "Microsoft First-Party"
+        $notes  += "Owned by Microsoft; no App Registration in this tenant"
+    }
+    # Gallery App
+    elseif (
+        ($sp.Tags -contains "WindowsAzureActiveDirectoryGalleryApplicationPrimary") -or
+        ($sp.Tags -contains "WindowsAzureActiveDirectoryCustomSingleSignOnApplication")
+    ) {
+        $isGallery = "Yes"
+        $appType   = "Gallery App (No App Reg)"
+        $notes    += "Gallery App; no App Registration in this tenant"
+    }
+    else {
+        $appType = "External / Unknown"
+        $notes  += "No App Registration found; not Gallery, Managed Identity, or First-Party"
+    }
+
+    # SSO Check
+    if ($sp.PreferredSingleSignOnMode -eq "saml") {
+        $hasSamlSignals = (
+            ($null -ne $sp.SamlMetadataUrl -and $sp.SamlMetadataUrl -ne "") -or
+            ($null -ne $sp.LoginUrl        -and $sp.LoginUrl        -ne "") -or
+            ($null -ne $sp.ReplyUrls       -and $sp.ReplyUrls.Count  -gt 0)
+        )
+        if ($hasSamlSignals) {
+            $ssoEnabled = "Yes"
+            $appType    = $appType + " + SAML-SSO"
+            $notes     += "SAML SSO Enabled; no App Reg to extract EntityId"
+        }
+    }
+
+    $allResults += New-Object PSObject -Property ([ordered]@{
+
+        # ── Identity ─────────────────────────────────────────────────────────
+        RecordType             = "Enterprise App Only"
+        DisplayName            = $sp.DisplayName
+        AppId                  = $sp.AppId
+        AppRegObjectId         = ""
+        EntAppObjectId         = $sp.Id
+        AppOwnerOrganizationId = $sp.AppOwnerOrganizationId
+
+        # ── Classification ───────────────────────────────────────────────────
+        AppType                = $appType
+        Protocol               = "N/A"
+        HasOpenIdScope         = "N/A"
+        IsMicrosoftFirstParty  = $isMsft
+        IsManagedIdentity      = $isManagedIdentity
+        IsGalleryApp           = $isGallery
+        LinkedToEnterpriseApp  = "No"
+
+        # ── SSO ──────────────────────────────────────────────────────────────
+        SSOEnabled             = $ssoEnabled
+        EntityId               = $entityId
+        PreferredSSOMode       = $sp.PreferredSingleSignOnMode
+        SamlMetadataUrl        = $sp.SamlMetadataUrl
+        LoginUrl               = $sp.LoginUrl
+
+        # ── App Registration Details ─────────────────────────────────────────
+        SignInAudience         = ""
+        IdentifierUris         = ""
+        RedirectUris           = ($sp.ReplyUrls -join "; ")
+        HasClientSecret        = "N/A"
+        HasCertificate         = "N/A"
+        RequiredResources      = ""
+        CreatedDateTime        = ""
+
+        # ── Enterprise App Details ───────────────────────────────────────────
+        AccountEnabled         = $sp.AccountEnabled
+        ServicePrincipalType   = $sp.ServicePrincipalType
+        Tags                   = ($sp.Tags -join "; ")
+
+        # ── Notes ────────────────────────────────────────────────────────────
+        Notes                  = ($notes -join " | ")
+    })
+}
+
+Write-Progress -Activity "Processing Standalone Enterprise Apps" -Completed
+
+#endregion
+
+#region ── EXPORT ──────────────────────────────────────────────────────────────
+
+$allResults | Export-Csv -Path $outputPath -NoTypeInformation -Encoding UTF8
+
+#endregion
+
+#region ── CONSOLE SUMMARY ─────────────────────────────────────────────────────
+
+Write-Host "`n============================================================" -ForegroundColor DarkCyan
+Write-Host " OVERALL SUMMARY" -ForegroundColor Cyan
+Write-Host "============================================================`n" -ForegroundColor DarkCyan
+
+Write-Host " Total Records in Output : $($allResults.Count)" -ForegroundColor White
+Write-Host " App Registrations       : $($allAppRegs.Count)" -ForegroundColor White
+Write-Host " Enterprise Apps         : $($allSPs.Count)"     -ForegroundColor White
+Write-Host " Standalone Ent Apps     : $($standaloneEntApps.Count)`n" -ForegroundColor White
+
+Write-Host "---- App Type Breakdown ----" -ForegroundColor Cyan
+$allResults | Group-Object -Property AppType |
+    Sort-Object Count -Descending |
+    Format-Table @{Label="App Type"; Expression={$_.Name}}, Count -AutoSize
+
+Write-Host "---- Protocol Breakdown ----" -ForegroundColor Cyan
+$allResults | Where-Object { $_.Protocol -ne "N/A" } |
+    Group-Object -Property Protocol |
+    Sort-Object Count -Descending |
+    Format-Table @{Label="Protocol"; Expression={$_.Name}}, Count -AutoSize
+
+Write-Host "---- SSO Enabled Apps ----" -ForegroundColor Cyan
+$allResults | Where-Object { $_.SSOEnabled -eq "Yes" } |
+    Sort-Object DisplayName |
+    Format-Table DisplayName, AppType, EntityId -AutoSize
+
+Write-Host "`n============================================================" -ForegroundColor DarkCyan
+Write-Host " OUTPUT FILE" -ForegroundColor Cyan
+Write-Host "============================================================`n" -ForegroundColor DarkCyan
+Write-Host " $outputPath" -ForegroundColor Green
+
+#endregion
+
+#region ── DISCONNECT ──────────────────────────────────────────────────────────
+
+Disconnect-MgGraph | Out-Null
+Write-Host "`n[OK] Disconnected from Microsoft Graph.`n" -ForegroundColor Green
+
+#endregion
