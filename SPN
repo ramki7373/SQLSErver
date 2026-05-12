@@ -1,0 +1,401 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Pulls all Service Principals (SPNs), Conditional Access Policies (CAPs),
+    and MFA information from Microsoft Entra ID and combines them into a report.
+
+.DESCRIPTION
+    This script:
+    1. Connects to Microsoft Graph API
+    2. Pulls all Service Principals (SPNs)
+    3. Pulls all Conditional Access Policies (CAPs)
+    4. Pulls MFA registration info for all users
+    5. Combines and links CAPs + MFA data to each SPN
+    6. Exports results to CSV and JSON
+
+.NOTES
+    Required Permissions (Graph API - Delegated or App):
+      - Application.Read.All
+      - Policy.Read.All
+      - UserAuthenticationMethod.Read.All
+      - Directory.Read.All
+      - AuditLog.Read.All (for sign-in logs, optional)
+
+.EXAMPLE
+    .\Get-SPNCAPMFAReport.ps1
+    .\Get-SPNCAPMFAReport.ps1 -OutputPath "C:\Reports" -ExportJson
+#>
+
+param (
+    [string]$OutputPath = ".",
+    [switch]$ExportJson,
+    [switch]$SkipMFA,
+    [switch]$Verbose
+)
+
+# ============================================================
+# SECTION 0 — SETUP & MODULE CHECK
+# ============================================================
+
+$ErrorActionPreference = "Stop"
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Entra SPN + CAP + MFA Report Tool    " -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Check if Microsoft.Graph module is installed
+$requiredModules = @("Microsoft.Graph.Authentication","Microsoft.Graph.Applications",
+                     "Microsoft.Graph.Identity.SignIns","Microsoft.Graph.Users",
+                     "Microsoft.Graph.Identity.DirectoryManagement")
+
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "[!] Module '$mod' not found. Installing..." -ForegroundColor Yellow
+        Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+    }
+    Import-Module $mod -ErrorAction SilentlyContinue
+}
+
+Write-Host "[OK] All required modules loaded." -ForegroundColor Green
+
+# ============================================================
+# SECTION 1 — CONNECT TO MICROSOFT GRAPH
+# ============================================================
+
+Write-Host ""
+Write-Host "[1/5] Connecting to Microsoft Graph..." -ForegroundColor Cyan
+
+$scopes = @(
+    "Application.Read.All",
+    "Policy.Read.All",
+    "Directory.Read.All",
+    "UserAuthenticationMethod.Read.All",
+    "AuditLog.Read.All"
+)
+
+try {
+    Connect-MgGraph -Scopes $scopes -NoWelcome
+    $context = Get-MgContext
+    Write-Host "[OK] Connected as: $($context.Account)" -ForegroundColor Green
+    Write-Host "     Tenant ID   : $($context.TenantId)" -ForegroundColor Gray
+} catch {
+    Write-Host "[ERROR] Failed to connect: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# SECTION 2 — PULL ALL SERVICE PRINCIPALS (SPNs)
+# ============================================================
+
+Write-Host ""
+Write-Host "[2/5] Pulling all Service Principals (SPNs)..." -ForegroundColor Cyan
+
+try {
+    $allSPNs = Get-MgServicePrincipal -All -Property `
+        Id, DisplayName, AppId, ServicePrincipalType,
+        AccountEnabled, SignInAudience, AppOwnerOrganizationId,
+        PublishedPermissionScopes, Tags, Homepage
+
+    Write-Host "[OK] Total SPNs found: $($allSPNs.Count)" -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Failed to retrieve SPNs: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# SECTION 3 — PULL ALL CONDITIONAL ACCESS POLICIES (CAPs)
+# ============================================================
+
+Write-Host ""
+Write-Host "[3/5] Pulling all Conditional Access Policies..." -ForegroundColor Cyan
+
+try {
+    $rawCAPs = Get-MgIdentityConditionalAccessPolicy -All
+
+    $allCAPs = $rawCAPs | ForEach-Object {
+        [PSCustomObject]@{
+            Id                  = $_.Id
+            DisplayName         = $_.DisplayName
+            State               = $_.State
+            IncludedApps        = ($_.Conditions.Applications.IncludeApplications -join ",")
+            ExcludedApps        = ($_.Conditions.Applications.ExcludeApplications -join ",")
+            IncludedUsers       = ($_.Conditions.Users.IncludeUsers -join ",")
+            ExcludedUsers       = ($_.Conditions.Users.ExcludeUsers -join ",")
+            IncludedGroups      = ($_.Conditions.Users.IncludeGroups -join ",")
+            ExcludedGroups      = ($_.Conditions.Users.ExcludeGroups -join ",")
+            GrantControls       = ($_.GrantControls.BuiltInControls -join ",")
+            Operator            = $_.GrantControls.Operator
+            SessionControls     = if ($_.SessionControls) {
+                                    ($_.SessionControls | ConvertTo-Json -Compress)
+                                  } else { "" }
+            PlatformsIncluded   = ($_.Conditions.Platforms.IncludePlatforms -join ",")
+            LocationsIncluded   = ($_.Conditions.Locations.IncludeLocations -join ",")
+            LocationsExcluded   = ($_.Conditions.Locations.ExcludeLocations -join ",")
+            SignInRiskLevels    = ($_.Conditions.SignInRiskLevels -join ",")
+            UserRiskLevels      = ($_.Conditions.UserRiskLevels -join ",")
+            MFARequired         = ($_.GrantControls.BuiltInControls -contains "mfa")
+            CreatedDateTime     = $_.CreatedDateTime
+            ModifiedDateTime    = $_.ModifiedDateTime
+        }
+    }
+
+    Write-Host "[OK] Total CAPs found: $($allCAPs.Count)" -ForegroundColor Green
+    Write-Host "     MFA-enforcing CAPs: $(($allCAPs | Where-Object { $_.MFARequired }).Count)" -ForegroundColor Gray
+
+} catch {
+    Write-Host "[ERROR] Failed to retrieve CAPs: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# SECTION 4 — PULL MFA REGISTRATION INFO
+# ============================================================
+
+$mfaByUser = @{}
+
+if (-not $SkipMFA) {
+    Write-Host ""
+    Write-Host "[4/5] Pulling MFA registration information..." -ForegroundColor Cyan
+    Write-Host "      This may take a while for large tenants..." -ForegroundColor Gray
+
+    try {
+        # Use credential user registration details (faster than per-user method calls)
+        $mfaRegistrations = Get-MgReportAuthenticationMethodUserRegistrationDetail -All
+
+        foreach ($reg in $mfaRegistrations) {
+            $mfaByUser[$reg.Id] = [PSCustomObject]@{
+                UserId                      = $reg.Id
+                UPN                         = $reg.UserPrincipalName
+                DisplayName                 = $reg.UserDisplayName
+                IsMFARegistered             = $reg.IsMfaRegistered
+                IsMFACapable                = $reg.IsMfaCapable
+                IsSSPRRegistered            = $reg.IsSsprRegistered
+                IsSSPRCapable               = $reg.IsSsprCapable
+                IsPasswordlessCapable       = $reg.IsPasswordlessCapable
+                MethodsRegistered           = ($reg.MethodsRegistered -join ", ")
+                DefaultMFAMethod            = $reg.DefaultMfaMethod
+                UserType                    = $reg.UserType
+                IsAdmin                     = $reg.IsAdmin
+            }
+        }
+
+        Write-Host "[OK] MFA registration data pulled for $($mfaByUser.Count) users." -ForegroundColor Green
+        Write-Host "     MFA registered: $(($mfaByUser.Values | Where-Object { $_.IsMFARegistered }).Count)" -ForegroundColor Gray
+        Write-Host "     MFA NOT registered: $(($mfaByUser.Values | Where-Object { -not $_.IsMFARegistered }).Count)" -ForegroundColor Gray
+
+    } catch {
+        Write-Host "[WARN] Could not pull MFA registration details (may need AuditLog.Read.All): $_" -ForegroundColor Yellow
+        Write-Host "       Falling back to per-user authentication method check..." -ForegroundColor Yellow
+
+        # Fallback: per-user authentication method check
+        $users = Get-MgUser -All -Property Id, DisplayName, UserPrincipalName, UserType
+
+        $i = 0
+        foreach ($user in $users) {
+            $i++
+            if ($i % 50 -eq 0) {
+                Write-Host "      Processed $i / $($users.Count) users..." -ForegroundColor Gray
+            }
+
+            try {
+                $methods = Get-MgUserAuthenticationMethod -UserId $user.Id
+                $mfaMethods = $methods | Where-Object {
+                    $_.AdditionalProperties["@odata.type"] -in @(
+                        "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod",
+                        "#microsoft.graph.phoneAuthenticationMethod",
+                        "#microsoft.graph.fido2AuthenticationMethod",
+                        "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod",
+                        "#microsoft.graph.softwareOathAuthenticationMethod"
+                    )
+                }
+
+                $methodNames = $mfaMethods | ForEach-Object {
+                    $_.AdditionalProperties["@odata.type"] -replace "#microsoft.graph.",""
+                }
+
+                $mfaByUser[$user.Id] = [PSCustomObject]@{
+                    UserId            = $user.Id
+                    UPN               = $user.UserPrincipalName
+                    DisplayName       = $user.DisplayName
+                    IsMFARegistered   = ($mfaMethods.Count -gt 0)
+                    MethodsRegistered = ($methodNames -join ", ")
+                }
+            } catch {
+                # Skip users we can't query
+            }
+        }
+
+        Write-Host "[OK] Fallback MFA check complete for $($mfaByUser.Count) users." -ForegroundColor Green
+    }
+} else {
+    Write-Host ""
+    Write-Host "[4/5] Skipping MFA pull (-SkipMFA flag set)." -ForegroundColor Yellow
+}
+
+# ============================================================
+# SECTION 5 — COMBINE SPNs + CAPs + MFA
+# ============================================================
+
+Write-Host ""
+Write-Host "[5/5] Combining data..." -ForegroundColor Cyan
+
+$combinedReport   = @()
+$capDetailReport  = @()
+$mfaReport        = @()
+
+# --- SPN + CAP + MFA combined ---
+foreach ($spn in $allSPNs) {
+
+    # Match CAPs that include this SPN's AppId or apply to "All" apps
+    $matchedCAPs = $allCAPs | Where-Object {
+        $_.IncludedApps -match $spn.AppId -or
+        $_.IncludedApps -match "All"
+    }
+
+    # CAPs that explicitly exclude this SPN
+    $excludedCAPs = $allCAPs | Where-Object {
+        $_.ExcludedApps -match $spn.AppId
+    }
+
+    # Remove excluded from matched
+    $effectiveCAPs = $matchedCAPs | Where-Object {
+        $excludedCAPs.Id -notcontains $_.Id
+    }
+
+    # Check if any effective CAP requires MFA
+    $mfaEnforcedByCAP = ($effectiveCAPs | Where-Object { $_.MFARequired }).Count -gt 0
+
+    $combinedReport += [PSCustomObject]@{
+        # SPN Info
+        SPNName                 = $spn.DisplayName
+        AppId                   = $spn.AppId
+        ObjectId                = $spn.Id
+        SPNType                 = $spn.ServicePrincipalType
+        AccountEnabled          = $spn.AccountEnabled
+        SignInAudience          = $spn.SignInAudience
+        Homepage                = $spn.Homepage
+
+        # CAP Info
+        TotalCAPsMatched        = $effectiveCAPs.Count
+        CAPsApplied             = ($effectiveCAPs.DisplayName -join " | ")
+        CAPStates               = ($effectiveCAPs.State -join " | ")
+        CAPGrantControls        = ($effectiveCAPs.GrantControls -join " | ")
+        CAPsExcluded            = ($excludedCAPs.DisplayName -join " | ")
+        MFARequiredByCAP        = $mfaEnforcedByCAP
+
+        # MFA Info (if not skipped)
+        MFAUsersRegistered      = if (-not $SkipMFA) {
+                                    ($mfaByUser.Values | Where-Object { $_.IsMFARegistered }).Count
+                                  } else { "N/A" }
+        MFAUsersNotRegistered   = if (-not $SkipMFA) {
+                                    ($mfaByUser.Values | Where-Object { -not $_.IsMFARegistered }).Count
+                                  } else { "N/A" }
+
+        # Risk summary
+        RiskFlag                = if (-not $mfaEnforcedByCAP -and $spn.AccountEnabled) {
+                                    "WARNING: No MFA CAP enforced"
+                                  } elseif (-not $spn.AccountEnabled) {
+                                    "DISABLED SPN"
+                                  } else { "OK" }
+    }
+}
+
+# --- CAP detail report ---
+$capDetailReport = $allCAPs | Select-Object `
+    Id, DisplayName, State, MFARequired,
+    IncludedApps, ExcludedApps,
+    IncludedUsers, ExcludedUsers,
+    IncludedGroups, ExcludedGroups,
+    GrantControls, Operator,
+    PlatformsIncluded, LocationsIncluded,
+    SignInRiskLevels, UserRiskLevels,
+    CreatedDateTime, ModifiedDateTime
+
+# --- MFA user report ---
+if (-not $SkipMFA) {
+    $mfaReport = $mfaByUser.Values | Select-Object `
+        UserId, UPN, DisplayName,
+        IsMFARegistered, IsMFACapable,
+        MethodsRegistered, DefaultMFAMethod,
+        IsPasswordlessCapable, IsAdmin, UserType
+}
+
+Write-Host "[OK] Combined report generated. Total SPN entries: $($combinedReport.Count)" -ForegroundColor Green
+
+# ============================================================
+# SECTION 6 — EXPORT REPORTS
+# ============================================================
+
+Write-Host ""
+Write-Host "[Export] Saving reports to: $OutputPath" -ForegroundColor Cyan
+
+if (-not (Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath | Out-Null
+}
+
+# 1. Main combined report
+$csvMain = Join-Path $OutputPath "SPN_CAP_MFA_Combined_$timestamp.csv"
+$combinedReport | Export-Csv -Path $csvMain -NoTypeInformation -Encoding UTF8
+Write-Host "[OK] Main report     : $csvMain" -ForegroundColor Green
+
+# 2. CAP detail report
+$csvCAP = Join-Path $OutputPath "CAP_Detail_$timestamp.csv"
+$capDetailReport | Export-Csv -Path $csvCAP -NoTypeInformation -Encoding UTF8
+Write-Host "[OK] CAP detail      : $csvCAP" -ForegroundColor Green
+
+# 3. MFA user report
+if (-not $SkipMFA) {
+    $csvMFA = Join-Path $OutputPath "MFA_Users_$timestamp.csv"
+    $mfaReport | Export-Csv -Path $csvMFA -NoTypeInformation -Encoding UTF8
+    Write-Host "[OK] MFA user report : $csvMFA" -ForegroundColor Green
+}
+
+# 4. SPNs with NO MFA CAP (risk list)
+$csvRisk = Join-Path $OutputPath "SPNs_No_MFA_Risk_$timestamp.csv"
+$combinedReport | Where-Object { $_.RiskFlag -like "WARNING*" } |
+    Export-Csv -Path $csvRisk -NoTypeInformation -Encoding UTF8
+Write-Host "[OK] Risk report     : $csvRisk" -ForegroundColor Green
+
+# 5. Optional JSON export
+if ($ExportJson) {
+    $jsonPath = Join-Path $OutputPath "SPN_CAP_MFA_Full_$timestamp.json"
+    @{
+        GeneratedAt   = (Get-Date -Format "o")
+        TenantId      = $context.TenantId
+        SPNs          = $combinedReport
+        CAPs          = $capDetailReport
+        MFAUsers      = $mfaReport
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPath -Encoding UTF8
+    Write-Host "[OK] JSON export     : $jsonPath" -ForegroundColor Green
+}
+
+# ============================================================
+# SECTION 7 — CONSOLE SUMMARY
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "             SUMMARY                    " -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Total SPNs                : $($allSPNs.Count)"
+Write-Host "  Total CAPs                : $($allCAPs.Count)"
+Write-Host "  CAPs enforcing MFA        : $(($allCAPs | Where-Object { $_.MFARequired }).Count)"
+Write-Host "  SPNs with MFA CAP         : $(($combinedReport | Where-Object { $_.MFARequiredByCAP }).Count)"
+Write-Host "  SPNs WITHOUT MFA CAP ⚠️  : $(($combinedReport | Where-Object { $_.RiskFlag -like 'WARNING*' }).Count)" -ForegroundColor Yellow
+
+if (-not $SkipMFA -and $mfaByUser.Count -gt 0) {
+    Write-Host "  Users with MFA registered : $(($mfaByUser.Values | Where-Object { $_.IsMFARegistered }).Count)"
+    Write-Host "  Users WITHOUT MFA ⚠️     : $(($mfaByUser.Values | Where-Object { -not $_.IsMFARegistered }).Count)" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "  Reports saved to: $OutputPath" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Disconnect
+Disconnect-MgGraph | Out-Null
+Write-Host "[Done] Disconnected from Microsoft Graph." -ForegroundColor Gray
