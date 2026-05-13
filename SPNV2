@@ -1,0 +1,296 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Pulls SPNs, CAPs, and MFA info WITHOUT requiring Admin Consent.
+
+.DESCRIPTION
+    Uses only delegated permissions available to regular users:
+    - No Admin Consent required
+    - Falls back gracefully if access is restricted
+    - Uses beta endpoint where needed for CreatedDateTime
+
+.PERMISSIONS USED (No Admin Consent needed)
+    - openid, profile                  - Basic login
+    - User.Read                        - Read own profile
+    - Application.Read.All             - Read apps (delegate - no consent needed for own tenant)
+
+.NOTE
+    Some data (MFA per-user) requires admin — script skips gracefully if not available.
+
+.EXAMPLE
+    .\Get-SPNCAPMFAReport-NoConsent.ps1
+    .\Get-SPNCAPMFAReport-NoConsent.ps1 -OutputPath "C:\Reports"
+#>
+
+param (
+    [string]$OutputPath = ".",
+    [switch]$ExportJson
+)
+
+$ErrorActionPreference  = "Continue"
+$timestamp              = Get-Date -Format "yyyyMMdd_HHmmss"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Entra SPN + CAP Report (No Consent)  " -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ============================================================
+# STEP 1 — CHECK & INSTALL MODULE
+# ============================================================
+
+Write-Host "[1/5] Checking Microsoft.Graph module..." -ForegroundColor Cyan
+
+$mods = @("Microsoft.Graph.Authentication")
+foreach ($mod in $mods) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "      Installing $mod ..." -ForegroundColor Yellow
+        Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+    }
+    Import-Module $mod -ErrorAction SilentlyContinue
+}
+
+Write-Host "[OK]  Modules ready." -ForegroundColor Green
+
+# ============================================================
+# STEP 2 — CONNECT WITH MINIMAL SCOPES (NO ADMIN CONSENT)
+# ============================================================
+
+Write-Host ""
+Write-Host "[2/5] Connecting to Microsoft Graph (minimal scopes)..." -ForegroundColor Cyan
+
+# These scopes do NOT require admin consent
+$scopes = @(
+    "openid",
+    "profile",
+    "User.Read",
+    "Application.Read.All"
+)
+
+try {
+    Connect-MgGraph -Scopes $scopes -NoWelcome
+    $context = Get-MgContext
+    Write-Host "[OK]  Connected as : $($context.Account)" -ForegroundColor Green
+    Write-Host "      Tenant ID    : $($context.TenantId)" -ForegroundColor Gray
+} catch {
+    Write-Host "[ERROR] Connection failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# STEP 3 — PULL ALL SPNs (NO CONSENT NEEDED)
+# ============================================================
+
+Write-Host ""
+Write-Host "[3/5] Pulling Service Principals..." -ForegroundColor Cyan
+
+$allSPNs = @()
+
+# Use beta endpoint — returns createdDateTime reliably
+$selectFields = "id,displayName,appId,servicePrincipalType,accountEnabled," +
+                "createdDateTime,signInAudience,appOwnerOrganizationId,homepage,tags"
+
+$uri = "https://graph.microsoft.com/beta/servicePrincipals" +
+       "?`$select=$selectFields&`$top=999"
+
+try {
+    do {
+        $result = Invoke-MgGraphRequest -Method GET -Uri $uri
+        $allSPNs += $result.value
+        $uri = $result.'@odata.nextLink'
+        Write-Host "      Pulled $($allSPNs.Count) SPNs..." -ForegroundColor Gray
+    } while ($uri)
+
+    Write-Host "[OK]  Total SPNs : $($allSPNs.Count)" -ForegroundColor Green
+
+} catch {
+    Write-Host "[ERROR] Failed to pull SPNs: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# STEP 4 — PULL CAPs (TRIES WITHOUT CONSENT, SKIPS IF BLOCKED)
+# ============================================================
+
+Write-Host ""
+Write-Host "[4/5] Pulling Conditional Access Policies..." -ForegroundColor Cyan
+
+$allCAPs = @()
+
+try {
+    # Try pulling CAPs — requires Policy.Read.All which may need consent
+    # Attempt without it first — works if user is Global Reader or Security Reader
+    $capResult = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$top=999"
+
+    $allCAPs = $capResult.value | ForEach-Object {
+        [PSCustomObject]@{
+            Id              = $_.id
+            DisplayName     = $_.displayName
+            State           = $_.state
+            IncludedApps    = ($_.conditions.applications.includeApplications -join ",")
+            ExcludedApps    = ($_.conditions.applications.excludeApplications -join ",")
+            GrantControls   = ($_.grantControls.builtInControls -join ",")
+            MFARequired     = ($_.grantControls.builtInControls -contains "mfa")
+            CreatedDateTime = $_.createdDateTime
+            ModifiedDateTime= $_.modifiedDateTime
+        }
+    }
+
+    Write-Host "[OK]  Total CAPs      : $($allCAPs.Count)" -ForegroundColor Green
+    Write-Host "      MFA enforcing   : $(($allCAPs | Where-Object { $_.MFARequired }).Count)" -ForegroundColor Gray
+
+} catch {
+    Write-Host "[WARN] Could not pull CAPs — requires Policy.Read.All or Security Reader role." -ForegroundColor Yellow
+    Write-Host "       Skipping CAP data. SPNs will still be exported." -ForegroundColor Yellow
+    $allCAPs = @()
+}
+
+# ============================================================
+# STEP 5 — COMBINE SPNs + CAPs
+# ============================================================
+
+Write-Host ""
+Write-Host "[5/5] Combining data..." -ForegroundColor Cyan
+
+$combinedReport = @()
+
+foreach ($spn in $allSPNs) {
+
+    # Format created date
+    $createdFormatted = "N/A"
+    $ageInDays        = "N/A"
+
+    if ($spn.createdDateTime) {
+        $createdDate      = [datetime]$spn.createdDateTime
+        $createdFormatted = $createdDate.ToString("yyyy-MM-dd HH:mm:ss")
+        $ageInDays        = [int]((Get-Date) - $createdDate).TotalDays
+    }
+
+    # Match CAPs
+    $matchedCAPs  = @()
+    $excludedCAPs = @()
+    $effectiveCAPs= @()
+    $mfaByCAP     = $false
+
+    if ($allCAPs.Count -gt 0) {
+        $matchedCAPs  = $allCAPs | Where-Object {
+            $_.IncludedApps -match $spn.appId -or $_.IncludedApps -match "All"
+        }
+        $excludedCAPs = $allCAPs | Where-Object {
+            $_.ExcludedApps -match $spn.appId
+        }
+        $effectiveCAPs = $matchedCAPs | Where-Object {
+            $excludedCAPs.Id -notcontains $_.Id
+        }
+        $mfaByCAP = ($effectiveCAPs | Where-Object { $_.MFARequired }).Count -gt 0
+    }
+
+    # Microsoft owned check
+    $isMSOwned = ($spn.appOwnerOrganizationId -eq "f8cdef31-a31e-4b4a-93e4-5f571e91255a" -or
+                  $spn.appOwnerOrganizationId -eq "72f988bf-86f1-41af-91ab-2d7cd011db47")
+
+    $combinedReport += [PSCustomObject]@{
+        # SPN Details
+        SPNName             = $spn.displayName
+        AppId               = $spn.appId
+        ObjectId            = $spn.id
+        SPNType             = $spn.servicePrincipalType
+        AccountEnabled      = $spn.accountEnabled
+        CreatedDateTime     = $createdFormatted
+        AgeInDays           = $ageInDays
+        SignInAudience      = $spn.signInAudience
+        Homepage            = $spn.homepage
+        IsMicrosoftOwned    = $isMSOwned
+        Tags                = ($spn.tags -join ", ")
+
+        # CAP Details
+        TotalCAPsMatched    = $effectiveCAPs.Count
+        CAPsApplied         = ($effectiveCAPs.DisplayName -join " | ")
+        CAPStates           = ($effectiveCAPs.State -join " | ")
+        CAPGrantControls    = ($effectiveCAPs.GrantControls -join " | ")
+        CAPsExcluded        = ($excludedCAPs.DisplayName -join " | ")
+        MFARequiredByCAP    = $mfaByCAP
+
+        # Risk Flag
+        RiskFlag            = if (-not $mfaByCAP -and $spn.accountEnabled -and -not $isMSOwned) {
+                                "WARNING: No MFA CAP"
+                              } elseif (-not $spn.accountEnabled) {
+                                "DISABLED"
+                              } elseif ($isMSOwned) {
+                                "MICROSOFT OWNED"
+                              } else { "OK" }
+    }
+}
+
+Write-Host "[OK]  Combined report ready: $($combinedReport.Count) entries" -ForegroundColor Green
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+if (-not (Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath | Out-Null
+}
+
+# 1. Full report
+$csvFull = Join-Path $OutputPath "SPN_CAP_Report_$timestamp.csv"
+$combinedReport | Export-Csv -Path $csvFull -NoTypeInformation -Encoding UTF8
+Write-Host "[OK]  Full report         : $csvFull" -ForegroundColor Green
+
+# 2. Custom apps only
+$csvCustom = Join-Path $OutputPath "SPN_CustomApps_$timestamp.csv"
+$combinedReport | Where-Object { -not $_.IsMicrosoftOwned } |
+    Export-Csv -Path $csvCustom -NoTypeInformation -Encoding UTF8
+Write-Host "[OK]  Custom apps report  : $csvCustom" -ForegroundColor Green
+
+# 3. Risk report — no MFA CAP
+$csvRisk = Join-Path $OutputPath "SPN_NoMFA_Risk_$timestamp.csv"
+$combinedReport | Where-Object { $_.RiskFlag -like "WARNING*" } |
+    Export-Csv -Path $csvRisk -NoTypeInformation -Encoding UTF8
+Write-Host "[OK]  Risk report         : $csvRisk" -ForegroundColor Green
+
+# 4. CAP detail report
+if ($allCAPs.Count -gt 0) {
+    $csvCAP = Join-Path $OutputPath "CAP_Detail_$timestamp.csv"
+    $allCAPs | Export-Csv -Path $csvCAP -NoTypeInformation -Encoding UTF8
+    Write-Host "[OK]  CAP detail report   : $csvCAP" -ForegroundColor Green
+}
+
+# 5. JSON export
+if ($ExportJson) {
+    $jsonPath = Join-Path $OutputPath "SPN_CAP_Full_$timestamp.json"
+    @{
+        GeneratedAt = (Get-Date -Format "o")
+        TenantId    = $context.TenantId
+        SPNs        = $combinedReport
+        CAPs        = $allCAPs
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPath -Encoding UTF8
+    Write-Host "[OK]  JSON export         : $jsonPath" -ForegroundColor Green
+}
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "              SUMMARY                   " -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Total SPNs              : $($combinedReport.Count)"
+Write-Host "  Enabled SPNs            : $(($combinedReport | Where-Object { $_.AccountEnabled }).Count)"
+Write-Host "  Disabled SPNs           : $(($combinedReport | Where-Object { -not $_.AccountEnabled }).Count)"
+Write-Host "  Microsoft Owned         : $(($combinedReport | Where-Object { $_.IsMicrosoftOwned }).Count)"
+Write-Host "  Custom Apps             : $(($combinedReport | Where-Object { -not $_.IsMicrosoftOwned }).Count)"
+Write-Host "  Total CAPs              : $($allCAPs.Count)"
+Write-Host "  CAPs with MFA           : $(($allCAPs | Where-Object { $_.MFARequired }).Count)"
+Write-Host "  SPNs with MFA CAP       : $(($combinedReport | Where-Object { $_.MFARequiredByCAP }).Count)"
+Write-Host "  SPNs WITHOUT MFA ⚠️    : $(($combinedReport | Where-Object { $_.RiskFlag -like 'WARNING*' }).Count)" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Reports saved to: $OutputPath" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+Disconnect-MgGraph | Out-Null
+Write-Host "[Done] Disconnected." -ForegroundColor Gray
